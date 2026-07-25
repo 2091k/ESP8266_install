@@ -6,187 +6,334 @@
 <title>ESP 本地固件烧录工具</title>
 <style>
 div,fieldset,input,select{padding:5px;font-size:1em;}
-fieldset{background:#4f4f4f;}
 p{margin:0.5em 0;}
 input{width:100%;box-sizing:border-box;-webkit-box-sizing:border-box;-moz-box-sizing:border-box;background:#dddddd;color:#000000;}
 input[type=checkbox],input[type=radio]{width:1em;margin-right:6px;vertical-align:-1px;}
 input[type=range]{width:99%;}
 select{width:100%;background:#dddddd;color:#000000;}
-textarea{resize:vertical;width:98%;height:318px;padding:5px;overflow:auto;background:#1f1f1f;color:#65c115;}
-body{text-align:center;font-family:verdana,sans-serif;background:#252525;color:#eaeaea;}
+body{text-align:center;font-family:verdana,sans-serif;background:#252525;color:#eaeaea;margin:16px;}
 td{padding:0px;}
-button{border:0;border-radius:0.3rem;background:#1fa3ec;color:#faffff;line-height:2.4rem;font-size:1.2rem;width:100%;-webkit-transition-duration:0.4s;transition-duration:0.4s;cursor:pointer;}
+button{border:0;border-radius:0.3rem;background:#1fa3ec;color:#faffff;line-height:2.4rem;font-size:1.1rem;width:100%;-webkit-transition-duration:0.4s;transition-duration:0.4s;cursor:pointer;margin:4px 0;}
 button:hover{background:#0e70a4;}
-.bred{background:#d43535;}
-.bred:hover{background:#931f1f;}
-.bgrn{background:#47c266;}
-.bgrn:hover{background:#5aaf6f;}
+button.bred{background:#d43535;}
+button.bred:hover{background:#931f1f;}
+button.bgrn{background:#47c266;}
+button.bgrn:hover{background:#5aaf6f;}
 a{color:#1fa3ec;text-decoration:none;}
-.p{float:left;text-align:left;}
-.q{float:right;text-align:right;}
-.r{border-radius:0.3em;padding:2px;margin:6px 2px;}
 #drop-area {
   border: 2px dashed #ccc;
   border-radius: 20px;
   width: 480px;
-  margin: auto;
+  margin: 16px auto;
   padding: 20px;
 }
 #drop-area.highlight {
   border-color: #1fa3ec;
 }
+#log{
+  width: 480px;
+  height:220px;
+  margin:12px auto;
+  padding:10px;
+  background:#111111;
+  color:#65c115;
+  text-align:left;
+  overflow-y:auto;
+  white-space:pre-wrap;
+  font-family:Consolas,monospace;
+  border:1px solid #555;
+  border-radius:6px;
+}
+.wrap{
+  display:inline-block;
+  min-width:500px;
+}
+.btn-row{
+  display:flex;
+  gap:8px;
+  margin:8px auto;
+  width:480px;
+}
+.btn-row button{
+  flex:1;
+}
+.info-text{
+  font-size:0.92em;color:#bbbbbb;
+}
+.set-row{
+  width:480px;
+  margin:6px auto;
+  display:flex;
+  gap:8px;
+}
+.set-row select{
+  flex:1;
+}
 </style>
-<script type="module" src="https://unpkg.com/tasmota-esp-web-tools@12.2.2/dist/web/install-button.js?module"></script>
+<script type="module" src="https://unpkg.com/esptool-js@0.6.0/bundle.js"></script>
 <script>
-var local_file = null;
-var using_local_file = false;
-var virtual_manifest = {
-  "name": "",
-  "version": "",
-  "new_install_prompt_erase": true,
-  "builds": [
-    { "chipFamily": "ESP32", "parts": [{ "path": "", "offset": 0 }]},
-    { "chipFamily": "ESP32-C2", "parts": [{ "path": "", "offset": 0 }]},
-    { "chipFamily": "ESP32-C3", "parts": [{ "path": "", "offset": 0 }]},
-    { "chipFamily": "ESP32-C5", "parts": [{ "path": "", "offset": 0 }]},
-    { "chipFamily": "ESP32-C6", "parts": [{ "path": "", "offset": 0 }]},
-    { "chipFamily": "ESP32-C61", "parts": [{ "path": "", "offset": 0 }]},
-    { "chipFamily": "ESP32-P4", "parts": [{ "path": "", "offset": 0 }]},
-    { "chipFamily": "ESP32-S2", "parts": [{ "path": "", "offset": 0 }]},
-    { "chipFamily": "ESP32-S3", "parts": [{ "path": "", "offset": 0 }]},
-    { "chipFamily": "ESP8266", "parts": [{ "path": "", "offset": 0 }]}
-  ]
-};
+import {ESPLoader, Transport} from 'https://unpkg.com/esptool-js@0.6.0/bundle.js';
 
+let port = null;
+let transport = null;
+let espLoader = null;
+let selectedBinFile = null;
+let baudRate = 115200;
+
+// Flash容量映射
+const flashSizeMap = {
+    "1MB": 0x100000,
+    "2MB": 0x200000,
+    "4MB": 0x400000,
+    "8MB": 0x800000
+};
+function getSelectedFlashSize(){
+    const sel = document.getElementById('flashSizeSel');
+    return flashSizeMap[sel.value];
+}
+
+const logDom = document.getElementById('log');
+
+//日志输出
+function log(msg, type="normal"){
+    let prefix = "";
+    if(type=="ok") prefix = "[成功] ";
+    if(type=="err") prefix = "[错误] ";
+    if(type=="warn") prefix = "[警告] ";
+    if(type=="info") prefix = "[信息] ";
+    const time = new Date().toLocaleTimeString();
+    logDom.innerText += `[${time}] ${prefix}${msg}\n`;
+    logDom.scrollTop = logDom.scrollHeight;
+}
+function clearLog(){
+    logDom.innerText="";
+}
+
+//串口连接
+async function connectSerial(){
+    try{
+        if(espLoader){
+            log("串口已经处于连接状态");
+            return;
+        }
+        log("正在请求串口权限，请在弹出窗口选择USB转TTL设备");
+        port = await navigator.serial.requestPort();
+        baudRate = parseInt(document.getElementById('baudRate').value);
+        transport = new Transport(port);
+        espLoader = new ESPLoader({
+            transport,
+            baudrate: baudRate,
+            terminal:{
+                write:(text)=>{log(text,"info");}
+            }
+        });
+        await espLoader.main();
+        const chipName = await espLoader.chipName();
+        log(`串口连接成功！检测芯片：${chipName}`,"ok");
+        updateButtonStatus(true);
+    }catch(err){
+        log(`串口连接失败：${err.message}`,"err");
+    }
+}
+async function disconnectSerial(){
+    try{
+        if(transport){
+            await transport.disconnect();
+        }
+    }catch(e){}
+    port=null;transport=null;espLoader=null;
+    log("已断开串口连接","info");
+    updateButtonStatus(false);
+}
+function updateButtonStatus(connected){
+    document.getElementById('btnConnect').disabled = connected;
+    document.getElementById('btnDisconnect').disabled = !connected;
+    document.getElementById('btnErase').disabled = !connected;
+    document.getElementById('btnFlash').disabled = !connected;
+    document.getElementById('btnVerify').disabled = !connected;
+    document.getElementById('btnBackup').disabled = !connected;
+}
+
+//整片擦除
+async function fullErase(){
+    if(!espLoader){log("请先连接串口！","warn");return;}
+    if(!confirm("确认执行整片Flash擦除？所有数据将永久删除！")) return;
+    try{
+        log("开始整片Flash擦除...");
+        await espLoader.flashErase();
+        log("整片Flash擦除完成！","ok");
+    }catch(e){
+        log(`擦除失败：${e.message}`,"err");
+    }
+}
+
+//烧录固件 地址0x00000
+async function flashFirmware(){
+    if(!espLoader){log("请先连接串口！","warn");return;}
+    if(!selectedBinFile){log("请先选择固件bin文件！","warn");return;}
+    try{
+        log(`开始写入固件：${selectedBinFile.name}`);
+        const buffer = await selectedBinFile.arrayBuffer();
+        const data = new Uint8Array(buffer);
+        await espLoader.writeFlash({data, address:0x00000});
+        log("固件写入完成，可以执行校验操作","ok");
+    }catch(e){
+        log(`固件写入失败：${e.message}`,"err");
+    }
+}
+
+//校验固件完整性
+async function verifyFirmware(){
+    if(!espLoader){log("请先连接串口！","warn");return;}
+    if(!selectedBinFile){log("请先选择固件bin文件！","warn");return;}
+    try{
+        log("开始校验Flash内固件与本地文件...");
+        const buffer = await selectedBinFile.arrayBuffer();
+        const localData = new Uint8Array(buffer);
+        const chipData = await espLoader.readFlash(0x00000, localData.length);
+        let equal = true;
+        for(let i=0;i<localData.length;i++){
+            if(localData[i]!==chipData[i]){equal=false;break;}
+        }
+        if(equal){
+            log("校验通过！芯片内固件和本地文件完全一致","ok");
+        }else{
+            log("校验失败！芯片固件和本地文件存在差异！","err");
+        }
+    }catch(e){
+        log(`校验失败：${e.message}`,"err");
+    }
+}
+
+//备份Flash，容量跟随选择框
+async function backupFlash(){
+    if(!espLoader){log("请先连接串口！","warn");return;}
+    const totalSize = getSelectedFlashSize();
+    const mb = (totalSize / 1024 / 1024).toFixed(0);
+    if(!confirm(`即将读取完整Flash(${mb}MB)并下载备份文件，是否继续？`)) return;
+    try{
+        log(`开始读取Flash数据，总大小 ${mb}MB`);
+        const data = await espLoader.readFlash(0x00000, totalSize);
+        const saveBlob = new Blob([data], {type:"application/octet-stream"});
+        const url = URL.createObjectURL(saveBlob);
+        const a = document.createElement("a");
+        a.href=url;
+        a.download=`flash_backup_${mb}MB_${new Date().getTime()}.bin`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        log(`${mb}MB Flash备份完成，文件已自动下载`,"ok");
+    }catch(e){
+        log(`备份失败：${e.message}`,"err");
+    }
+}
+
+//文件拖拽选择
 function openFileDialog(){
-  let input = document.createElement('input');
-  input.type = 'file';
-  input.onchange = _ => {
-    handleFiles(input.files);
-  };
-  input.click();
+    const input = document.createElement('input');
+    input.type='file';
+    input.accept=".bin";
+    input.onchange = evt=>{
+        if(evt.target.files.length>0){
+            loadBinFile(evt.target.files[0]);
+        }
+    }
+    input.click();
+}
+function loadBinFile(file){
+    if(!file.name.toLowerCase().endsWith(".bin")){
+        log("错误：只能选择 .bin 固件文件！","err");
+        return;
+    }
+    selectedBinFile = file;
+    document.getElementById("selectedFileName").innerText = `已选择固件：${file.name} (${(file.size/1024).toFixed(2)} KB)`;
+    log(`成功加载固件文件：${file.name}`,"info");
 }
 
 function preventDefaults (e) {
-  e.preventDefault();
-  e.stopPropagation();
+    e.preventDefault();
+    e.stopPropagation();
 }
-
 function highlight(e) {
-  dropArea.classList.add('highlight');
+    document.getElementById('drop-area').classList.add('highlight');
 }
-
 function unhighlight(e) {
-  dropArea.classList.remove('highlight');
+    document.getElementById('drop-area').classList.remove('highlight');
 }
-
 function handleDrop(e) {
-  var dt = e.dataTransfer;
-  var files = dt.files;
-  handleFiles(files);
+    const dt = e.dataTransfer;
+    const files = dt.files;
+    if(files.length>0) loadBinFile(files[0]);
 }
 
-function handleFiles(files) {
-  files = [...files];
-  console.log(files);
-  using_local_file = true;
-  document.getElementById("file_upload_infotext").innerHTML = "选中固件，点击上方【连接】按钮开始烧录";
-  document.getElementById("dropped_firmware").innerText = files[0].name;
-  const resetLink = document.getElementById("reset_local_file");
-  if(resetLink){
-    resetLink.style.display = "none";
-  }
-  const button = document.querySelector("esp-web-install-button");
-  virtual_manifest.name = files[0].name;
-  button.manifest = JSON.stringify(virtual_manifest);
-  button.firmwareFile = files[0];
-}
-
-function prepareDropZone(){
-  ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
-    dropArea.addEventListener(eventName, preventDefaults, false);
-    document.body.addEventListener(eventName, preventDefaults, false);
-  });
-  ['dragenter', 'dragover'].forEach(eventName => {
-    dropArea.addEventListener(eventName, highlight, false);
-  });
-  ['dragleave', 'drop'].forEach(eventName => {
-    dropArea.addEventListener(eventName, unhighlight, false);
-  });
-  dropArea.addEventListener('drop', handleDrop, false);
-}
-
-window.addEventListener("load", function(event) {
-  window.dropArea = document.getElementById("drop-area");
-  prepareDropZone();
-
-  const baudRateSelect = document.getElementById('baudRate');
-  const installButton = document.querySelector('esp-web-install-button');
-  if (baudRateSelect && installButton) {
-    baudRateSelect.addEventListener('change', function() {
-      const selectedRate = this.value;
-      if (selectedRate === '') {
-        installButton.removeAttribute('baud-rate');
-      } else {
-        installButton.setAttribute('baud-rate', selectedRate);
-      }
+window.onload = ()=>{
+    const dropArea = document.getElementById("drop-area");
+    ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+        dropArea.addEventListener(eventName, preventDefaults, false);
+        document.body.addEventListener(eventName, preventDefaults, false);
     });
-  }
-  try{
-    const button = document.querySelector("esp-web-install-button");
-    button.overrides = {
-      checkSameFirmware(manifest, improvInfo) {
-        const manifestFirmware = manifest.name.toLowerCase();
-        const deviceFirmware = improvInfo.firmware.toLowerCase();
-        return manifestFirmware.includes(deviceFirmware);
-      }
-    };
-  }catch(e){
-    console.log(e);
-  }
-},{ once: true });
+    ['dragenter', 'dragover'].forEach(eventName => dropArea.addEventListener(eventName, highlight, false));
+    ['dragleave', 'drop'].forEach(eventName => dropArea.addEventListener(eventName, unhighlight, false));
+    dropArea.addEventListener('drop', handleDrop, false);
+    updateButtonStatus(false);
+}
 </script>
 </head>
 <body>
-<div style='display:inline-block;color:#eaeaea;min-width:340px;'>
-<h1>ESP 本地固件烧录工具</h1>
-<div class='pick-variant'>
-<ol style='text-align:left'>
-<li>使用USB转TTL模块将ESP开发板连接电脑</li><br/>
-<li>选择本地固件文件（factory.bin）</li><br/>
-<li>点击【连接】，选择串口端口开始烧录</li>
-</ol>
-<br/>
-<p>烧录波特率：</p>
-<select id="baudRate">
-<option value="115200" selected>115200 Baud（推荐）</option>
-<option value="230400">230400 Baud</option>
-<option value="460800">460800 Baud</option>
-<option value="921600">921600 Baud</option>
-<option value="1500000">1500000 Baud</option>
-<option value="2000000">2000000 Baud</option>
-</select>
-<div style="text-align:center;margin-top:1em;">
-<esp-web-install-button id="inst" baud-rate="115200">
-<i slot="unsupported">
-你的浏览器不支持Web Serial功能<br/>
-请使用 Google Chrome 或 Microsoft Edge 浏览器打开页面
-</i>
-</esp-web-install-button>
-</div>
-</div>
-<div id="drop-area">
-<form class="my-form">
-<p id="file_upload_infotext">点击下方按钮选择 factory.bin，或将bin固件直接拖拽到虚线区域内</p>
-<p id="dropped_firmware"></p>
-</form>
-</div>
-<h1>↑</h1>
-<button id="fileElem" accept=".bin" onclick="openFileDialog()">选择本地 factory.bin 固件</button>
-<div style='text-align:right;font-size:11px;margin-top:16px;'>
-<hr/>
-仅支持本地固件文件烧录
-</div>
+<div class="wrap">
+    <h1>ESP 本地固件烧录工具</h1>
+    <ol style="text-align:left;width:480px;margin:10px auto;">
+        <li>USB转TTL模块连接ESP开发板，进入下载模式</li><br/>
+        <li>点击【连接串口】，选择对应的串口设备</li><br/>
+        <li>选择本地 factory.bin 固件文件</li><br/>
+        <li>执行擦除 → 写入 → 校验，完成烧录</li>
+    </ol>
+
+    <div class="set-row">
+        <select id="baudRate">
+            <option value="115200" selected>波特率：115200 Baud（推荐）</option>
+            <option value="230400">波特率：230400 Baud</option>
+            <option value="460800">波特率：460800 Baud</option>
+            <option value="921600">波特率：921600 Baud</option>
+            <option value="1500000">波特率：1500000 Baud</option>
+            <option value="2000000">波特率：2000000 Baud</option>
+        </select>
+        <select id="flashSizeSel">
+            <option value="1MB" selected>Flash容量：1MB（默认）</option>
+            <option value="2MB">Flash容量：2MB</option>
+            <option value="4MB">Flash容量：4MB</option>
+            <option value="8MB">Flash容量：8MB</option>
+        </select>
+    </div>
+
+    <div class="btn-row">
+        <button id="btnConnect" onclick="connectSerial()">连接串口</button>
+        <button id="btnDisconnect" onclick="disconnectSerial()">断开串口</button>
+    </div>
+
+    <div id="drop-area">
+        <p>点击下方按钮选择固件，或将 .bin 文件拖拽到此虚线框内</p>
+        <p id="selectedFileName" class="info-text"></p>
+    </div>
+    <button onclick="openFileDialog()">选择本地 factory.bin 固件</button>
+
+    <div class="btn-row">
+        <button id="btnErase" class="bred" onclick="fullErase()">整片擦除Flash</button>
+        <button id="btnFlash" class="bgrn" onclick="flashFirmware()">写入固件</button>
+    </div>
+    <div class="btn-row">
+        <button id="btnVerify" onclick="verifyFirmware()">校验固件完整性</button>
+        <button id="btnBackup" onclick="backupFlash()">备份Flash</button>
+    </div>
+
+    <p>运行日志：</p>
+    <div id="log"></div>
+    <button onclick="clearLog()" style="width:480px;">清空日志</button>
+
+    <div style="margin-top:20px;font-size:11px;color:#888888;">
+        ⚠️ 仅支持本地固件 | 支持 ESP8266 / ESP32 全系列 | 使用WebSerial，Chrome/Edge浏览器可用
+    </div>
 </div>
 </body>
 </html>
